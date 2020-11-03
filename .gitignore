@@ -1,4 +1,4 @@
-hasm_g
-hasm
+hvm
+hvm_g
 *.hack
 !*.cmp.hack
