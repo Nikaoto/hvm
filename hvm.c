@@ -21,7 +21,181 @@
 #define ERR_TEXT_SIZE                      200
 #define FILE_PATH_SIZE                     200
 
+#define INST_ARRAY_INITIAL_CAPACITY        1024
+#define INST_ARRAY_CAPACITY_GROWTH_RATE    1024
 #define COMMENT_HEADERS_IN_OUTFILE         1
+#define INITIAL_HACK_CODE_SIZE_PER_INST    8
+
+// str.c stuff
+#define CHAR_ARR_GROWTH_RATE               256
+
+void char_arr_free(char *str)
+{
+    free(((int*)(void*)str - 2));
+}
+
+char *char_arr_append(char *str, char *app)
+{
+    int app_len = strlen(app);;
+    int *p = NULL;
+
+    // Grow if necessary
+    if (str == 0 || app_len + *((int*)(void*)str - 1) >= *((int*)(void*)str - 2)) {
+        int grow_amount = CHAR_ARR_GROWTH_RATE > app_len ? CHAR_ARR_GROWTH_RATE : app_len;
+        int curr_size = str ? *((int*)(void*)str - 2) : 0;
+        int new_size = sizeof(char) * (curr_size + grow_amount) + sizeof(int)*2;
+        p = (int*) realloc(str ? *((int*)(void*)str - 2) : 0, new_size);
+    }
+
+    // Append new chars
+    for (int i = 0; i < app_len; i++)
+        p[2+i] = app_len;
+
+    return p+2;
+}
+
+// end str.c stuff
+
+enum ACTION {
+    ACTION_POP = 0,
+    ACTION_PUSH,
+    ACTION_ADD,
+    ACTION_SUB,
+    ACTION_NEG,
+    ACTION_EQ,
+    ACTION_GT,
+    ACTION_LT,
+    ACTION_AND,
+    ACTION_OR,
+    ACTION_NOT,
+    ACTION_PARSE_ERROR,
+};
+
+enum SEGMENT {
+    SEGMENT_NONE = 0,
+    SEGMENT_ARGUMENT,
+    SEGMENT_LOCAL,
+    SEGMENT_STATIC,
+    SEGMENT_CONSTANT,
+    SEGMENT_THIS,
+    SEGMENT_THAT,
+    SEGMENT_POINTER,
+    SEGMENT_TEMP,
+    SEGMENT_PARSE_ERROR,
+};
+
+char *INST_ACTION_STRINGS[] = {
+    [ACTION_POP]  = "pop",
+    [ACTION_PUSH] = "push",
+    [ACTION_ADD]  = "add",
+    [ACTION_SUB]  = "sub",
+    [ACTION_NEG]  = "neg",
+    [ACTION_EQ]   = "eq",
+    [ACTION_GT]   = "gt",
+    [ACTION_LT]   = "lt",
+    [ACTION_AND]  = "and",
+    [ACTION_OR]   = "or",
+    [ACTION_NOT]  = "not",
+};
+
+char *INST_SEGMENT_STRINGS[] = {
+    [SEGMENT_NONE]     = "NONE",
+    [SEGMENT_ARGUMENT] = "argument",
+    [SEGMENT_LOCAL]    = "local",
+    [SEGMENT_STATIC]   = "static",
+    [SEGMENT_CONSTANT] = "constant",
+    [SEGMENT_THIS]     = "this",
+    [SEGMENT_THAT]     = "that",
+    [SEGMENT_POINTER]  = "pointer",
+    [SEGMENT_TEMP]     = "temp",
+};
+
+typedef struct {
+    enum ACTION action;
+    enum SEGMENT segment;
+    int number;
+} Instruction;
+
+void print_instruction(Instruction *inst)
+{
+    printf("action=%s, segment=%s, number=%i\n",
+        INST_ACTION_STRINGS[inst->action],
+        INST_SEGMENT_STRINGS[inst->segment],
+        inst->number);
+}
+
+int snprintf_instruction(char *str, size_t size, Instruction *inst)
+{
+    if (inst->segment == SEGMENT_NONE)
+        return snprintf(str, size, "%s", INST_ACTION_STRINGS[inst->action]);
+    return snprintf(str, size, "%s %s %i",
+        INST_ACTION_STRINGS[inst->action],
+        INST_SEGMENT_STRINGS[inst->segment],
+        inst->number);
+}
+
+// String, but defined by a range in memory (inclusive)
+// Doesn't have to be null-terminated
+typedef struct {
+    char *start; // inclusive
+    char *end; // inclusive
+} Slice;
+
+inline int is_number(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+// Returns a^b
+// 'b' must be non-negative (given the return type of the function)
+int power(int a, int b)
+{
+    if (a == 0)
+        return 0;
+
+    int ans = 1;
+    while (b-- > 0)
+        ans *= a;
+
+    return ans;
+}
+
+// Parses and returns first int from 'buf' to 'end' inclusive.
+// NOTE: The given range MUST ONLY contain digits or a leading minus,
+//  otherwise, undefined behavior
+int parse_next_int(char *buf, char *end)
+{
+    int num = 0;
+    int negative = 0;
+
+    // Check if negative
+    if (*buf == '-') {
+        negative = 1;
+        buf++;
+    }
+
+    // Skip leading zeros
+    if (*buf == '0') {
+        while (*(buf + 1) == '0') {
+            buf++;
+        }
+    }
+
+    // Build num up backwards
+    char *p = end;
+    size_t rpos = 0; // Position of current digit from right
+    while (p >= buf) {
+        int n = *p - '0';
+        num += n * power(10, rpos);
+        p--;
+        rpos++;
+    }
+
+    if (negative)
+        return -num;
+
+    return num;
+}
 
 // Return pointer to first occurrence of 'pat' in 'str'
 // Checks from 'str' to 'end' inclusive
@@ -66,6 +240,21 @@ char *find_next_any(char *str, char *chars)
 inline size_t find_next_any_index(char *str, size_t i, char *c)
 {
     return find_next_any(str + i, c) - str;
+}
+
+// Return 1 if str begins with pat (only stopping when pat reaches '\0')
+// Return 0 otherwise, or if str ends before pat
+int str_begins_with(char *str, char *pat)
+{
+    while (*pat != '\0') {
+        if (*str != *pat)
+            return 0;
+        pat++;
+        if (*pat == '\0')
+            return 1;
+        str++;
+    }
+    return 1;
 }
 
 // Return index of first occurrence of t in s
@@ -209,15 +398,17 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    size_t instructions_capacity = INST_ARRAY_INITIAL_CAPACITY;
+    Instruction *instructions = malloc(sizeof(Instruction) *
+        instructions_capacity);
+
     // Completely read file into a buffer
-    /*size_t input_file_size;
-    char *input_buf = load_file(input_file_path, &input_file_size);*/
+    size_t input_file_size;
+    char *input_buf = load_file(input_file_path, &input_file_size);
 
-    char *input_buf = "push constant 10\n";
-
-
+    // Parse all instructions into instructions array
     size_t inst_count = 0;
-    size_t src_line_count = 0; // for pointing out errors
+    size_t src_line_count = 1; // for pointing out errors
     for (size_t i = 0; input_buf[i] != '\0';) {
         // Skip whitespace
         switch (input_buf[i]) {
@@ -231,72 +422,129 @@ int main(int argc, char* argv[])
             src_line_count++;
             continue;
         }
-        
-        // Handle comment
+
+        // Handle line starting with comment
         if (input_buf[i] == '/' && input_buf[i+1] == '/') {
             // Skip rest of line
             i = find_next_any_index(input_buf, i, "\r\n") + 1;
             continue;
         }
 
-        // Handle pop instruction
-        if (strindex(input_buf + i, "pop") == 0) {
-            i += 3;
-
-            // Skip whitespace
-            while (input_buf[i] == ' ' || input_buf[i] == '\t')
-                i++;
-            
-            // Find end of line
-            char *end = find_next_any(input_buf + i, "\r\n");
-
-             // Find comment between token and end of line
-            char *comment_start = strstr_range(input_buf + i, "//", end - 1);
-            if (comment_start != NULL) {
-                // Parse from start of line until comment start
-                end = comment_start;
+        // Parse action
+        int action_found = 0;
+        for (size_t k = 0; k < sizeof(INST_ACTION_STRINGS) / sizeof(char*); k++) {
+            if (str_begins_with(input_buf + i, INST_ACTION_STRINGS[k])) {
+                action_found = 1;
+                // TODO precompile lengths so we don't have to use strlen here
+                i += strlen(INST_ACTION_STRINGS[k]);
+                instructions[inst_count].action = k;
+                continue;
             }
-
-            // TODO parse pop instruction here
-
-            inst_count++;
-
-            // Skip rest of line
-            i = find_next_any_index(input_buf, i, "\r\n") + 1;
-            continue;
         }
 
-        // Handle push instruction
-        if (strindex(input_buf + i, "push") == 0) {
-            i += 4;
+        // No action means invalid instruction
+        if (!action_found) {
+            printf("Invalid instruction on line %li\n", src_line_count + 1);
+            return 1;
+        }
 
-            // Skip whitespace
-            while (input_buf[i] == ' ' || input_buf[i] == '\t')
-                i++;
+        // Skip whitespace
+        while (input_buf[i] == ' ' || input_buf[i] == '\t')
+            i++;
+
+        // Parse memory segment
+        int segment_found = 0;
+        for (size_t k = 0; k < sizeof(INST_SEGMENT_STRINGS) / sizeof(char*); k++) {
+            if (str_begins_with(input_buf + i, INST_SEGMENT_STRINGS[k])) {
+                segment_found = 1;
+                // TODO precompile lengths so we don't have to use strlen here
+                i += strlen(INST_SEGMENT_STRINGS[k]);
+                instructions[inst_count].segment = k;
+                continue;
+            }
+        }
+
+        // Skip whitespace
+        while (input_buf[i] == ' ' || input_buf[i] == '\t')
+            i++;
+
+        // Parse number (only valid when segment found)
+        if (is_number(input_buf[i]) && segment_found) {
+            // Find end of number token
+            char *num_end = input_buf + i + 1;
+            while (is_number(*num_end))
+                num_end++;
+            num_end--; // Stand on last digit of number
+
+            // Parse the number and add to instruction
+            instructions[inst_count].number = parse_next_int(input_buf + i, num_end);
 
             // Find end of line
-            char *end = find_nex_any(input_buf + i, "\r\n");
+            char *line_end = find_next_any(input_buf + i, "\r\n");
+            char *inst_end = line_end;
 
             // Find comment between token and end of line
-            char *comment_start = strstr_range(input_buf + i, "//", end - 1);
-            continue;
+            char *comment_start = strstr_range(input_buf + i, "//", inst_end - 1);
+            if (comment_start != NULL) {
+                // Parse from start of line until comment start
+                inst_end = comment_start;
+            }
+
+            // Check for invalid chars between num_end and end
+            num_end++; // Stand on char after number
+            while (num_end < inst_end) {
+                // Only whitespace is valid
+                if (*num_end != ' ' && *num_end != '\t') {
+                    printf("Invalid char '%c' on line %li\n", *num_end, src_line_count);
+                    return 1;
+                }
+                num_end++;
+            }
+
+            // Move i to the end of the line
+            i = line_end - input_buf + 1;
         }
-        
-        // No push or pop instruction, give error
-        printf("Invalid instruction on line %li\n", src_line_count + 1);
-        return 1;
+
+        inst_count++;
     }
 
-    char *output_buf = "@10\n"
+    size_t out_buf_size = INITIAL_HACK_CODE_SIZE_PER_INST * inst_count * sizeof(char);
+    char *out_buf = malloc(out_buf_size);
+    size_t out_i = 0; // index of last written char in out_buf
+    // Generate code for each instruction
+    for (size_t i = 0; i < inst_count; i++) {
+        int line_size = 0;
+
+        // Keep resizing output_buf until new instruction fits
+        while(1) {
+            line_size = snprintf_instruction(out_buf + out_i, out_buf_size - out_i,
+                instructions + i);
+            // If out_buf is full, reallocate and restart loop
+            if (line_size > out_buf_size - out_i) {
+                out_buf_size *= 2;
+                out_buf = realloc(out_buf, out_buf_size);
+                continue;
+            }
+            out_i += line_size;
+            break;
+        }
+
+        out_buf[out_i++] = '\n';
+    }
+
+    out_buf[++out_i] = '\0';
+
+    printf("%s", out_buf);
+
+    /*char *out_buf = "@10\n"
                        "D=A\n"
                        "@SP\n"
                        "A=M\n"
                        "M=D\n"
                        "@SP\n"
-                       "M=M+1\n";
+                       "M=M+1\n";*/
 
     // Print the file to stdout
-    printf("\nInput is:\n%s\nOutput is:\n%s\n", input_buf, output_buf);
-
+    //printf("\nInput is:\n%s\nOutput is:\n%s\n", input_buf, output_buf);
     return 0;
 }
