@@ -26,89 +26,7 @@
 #define COMMENT_HEADERS_IN_OUTFILE         1
 #define INITIAL_HACK_CODE_SIZE_PER_INST    8
 
-// str.c stuff
-#define CHAR_ARR_GROWTH_RATE               256
-
-void char_arr_free(char *str)
-{
-    free(((int*)(void*)str - 2));
-}
-
-char *char_arr_append(char *str, char *app)
-{
-    int app_len = strlen(app);;
-    int *p = NULL;
-
-    // Grow if necessary
-    if (str == 0 || app_len + *((int*)(void*)str - 1) >= *((int*)(void*)str - 2)) {
-        int grow_amount = CHAR_ARR_GROWTH_RATE > app_len ? CHAR_ARR_GROWTH_RATE : app_len;
-        int curr_size = str ? *((int*)(void*)str - 2) : 0;
-        int new_size = sizeof(char) * (curr_size + grow_amount) + sizeof(int)*2;
-        p = (int*) realloc(str ? *((int*)(void*)str - 2) : 0, new_size);
-    }
-
-    // Append new chars
-    for (int i = 0; i < app_len; i++)
-        p[2+i] = app_len;
-
-    return p+2;
-}
-
-// end str.c stuff
-
-enum ACTION {
-    ACTION_POP = 0,
-    ACTION_PUSH,
-    ACTION_ADD,
-    ACTION_SUB,
-    ACTION_NEG,
-    ACTION_EQ,
-    ACTION_GT,
-    ACTION_LT,
-    ACTION_AND,
-    ACTION_OR,
-    ACTION_NOT,
-    ACTION_PARSE_ERROR,
-};
-
-enum SEGMENT {
-    SEGMENT_NONE = 0,
-    SEGMENT_ARGUMENT,
-    SEGMENT_LOCAL,
-    SEGMENT_STATIC,
-    SEGMENT_CONSTANT,
-    SEGMENT_THIS,
-    SEGMENT_THAT,
-    SEGMENT_POINTER,
-    SEGMENT_TEMP,
-    SEGMENT_PARSE_ERROR,
-};
-
-char *INST_ACTION_STRINGS[] = {
-    [ACTION_POP]  = "pop",
-    [ACTION_PUSH] = "push",
-    [ACTION_ADD]  = "add",
-    [ACTION_SUB]  = "sub",
-    [ACTION_NEG]  = "neg",
-    [ACTION_EQ]   = "eq",
-    [ACTION_GT]   = "gt",
-    [ACTION_LT]   = "lt",
-    [ACTION_AND]  = "and",
-    [ACTION_OR]   = "or",
-    [ACTION_NOT]  = "not",
-};
-
-char *INST_SEGMENT_STRINGS[] = {
-    [SEGMENT_NONE]     = "NONE",
-    [SEGMENT_ARGUMENT] = "argument",
-    [SEGMENT_LOCAL]    = "local",
-    [SEGMENT_STATIC]   = "static",
-    [SEGMENT_CONSTANT] = "constant",
-    [SEGMENT_THIS]     = "this",
-    [SEGMENT_THAT]     = "that",
-    [SEGMENT_POINTER]  = "pointer",
-    [SEGMENT_TEMP]     = "temp",
-};
+#include "hvm.h"
 
 typedef struct {
     enum ACTION action;
@@ -129,6 +47,16 @@ int snprintf_instruction(char *str, size_t size, Instruction *inst)
     if (inst->segment == SEGMENT_NONE)
         return snprintf(str, size, "%s", INST_ACTION_STRINGS[inst->action]);
     return snprintf(str, size, "%s %s %i",
+        INST_ACTION_STRINGS[inst->action],
+        INST_SEGMENT_STRINGS[inst->segment],
+        inst->number);
+}
+
+int snprintf_instruction_comment(char *str, size_t size, Instruction *inst)
+{
+    if (inst->segment == SEGMENT_NONE)
+        return snprintf(str, size, "// %s", INST_ACTION_STRINGS[inst->action]);
+    return snprintf(str, size, "// %s %s %i",
         INST_ACTION_STRINGS[inst->action],
         INST_SEGMENT_STRINGS[inst->segment],
         inst->number);
@@ -289,8 +217,8 @@ int strindex_last(char *s, char *t)
 
     while (s != s_start) {
         while (*s-- == *t--) {
-            if (t == t_start && *s == *t) // Return index
-                return s - s_start;
+            if ((t == t_start && *s == *t) || t_end == t_start) // Return index
+                return s - s_start + ((t_end == t_start) ? 1 : 0);
         }
         t = t_end; // Reset t
     }
@@ -397,6 +325,14 @@ int main(int argc, char* argv[])
         printf("%s\n", error_text);
         return 1;
     }
+
+    // Determine file name
+    char input_file_name[FILE_PATH_SIZE];
+    int last_slash_i = strindex_last(input_file_path, "/");
+
+    // Copy from last_slash_i + 1 to the end
+    for (int i = 0, j = last_slash_i + 1; input_file_path[j-1] != '\0'; i++, j++)
+        input_file_name[i] = input_file_path[j];
 
     size_t instructions_capacity = INST_ARRAY_INITIAL_CAPACITY;
     Instruction *instructions = malloc(sizeof(Instruction) *
@@ -510,17 +446,18 @@ int main(int argc, char* argv[])
 
     size_t out_buf_size = INITIAL_HACK_CODE_SIZE_PER_INST * inst_count * sizeof(char);
     char *out_buf = malloc(out_buf_size);
+
     size_t out_i = 0; // index of last written char in out_buf
     // Generate code for each instruction
     for (size_t i = 0; i < inst_count; i++) {
         int line_size = 0;
 
-        // Keep resizing output_buf until new instruction fits
+        // Keep resizing out_buf until new line of comment fits
         while(1) {
-            line_size = snprintf_instruction(out_buf + out_i, out_buf_size - out_i,
+            line_size = snprintf_instruction_comment(out_buf + out_i, out_buf_size - out_i,
                 instructions + i);
             // If out_buf is full, reallocate and restart loop
-            if (line_size > out_buf_size - out_i) {
+            if (line_size >= out_buf_size - out_i) {
                 out_buf_size *= 2;
                 out_buf = realloc(out_buf, out_buf_size);
                 continue;
@@ -528,23 +465,230 @@ int main(int argc, char* argv[])
             out_i += line_size;
             break;
         }
-
         out_buf[out_i++] = '\n';
+
+        int append_size = 0;
+        // Keep resizing out_buf until new instructions fit
+        while (1) {
+            switch (instructions[i].segment) {
+            case SEGMENT_ARGUMENT:
+            case SEGMENT_LOCAL:
+            case SEGMENT_THIS:
+            case SEGMENT_THAT:
+            case SEGMENT_TEMP:
+                if (instructions[i].action == ACTION_POP) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@%i\n"
+                        "D=A\n"
+                        "@%s\n"
+                        "D=D+%s\n"
+                        "@__loc\n"
+                        "M=D\n"
+                        "@SP\n"
+                        "M=M-1\n"
+                        "A=M\n"
+                        "D=M\n"
+                        "@__loc\n"
+                        "A=M\n"
+                        "M=D\n",
+                        instructions[i].number,
+                        SEGMENT_TO_REGISTER_NAME[instructions[i].segment],
+                        instructions[i].segment == SEGMENT_TEMP ? "A" : "M");
+                } else if (instructions[i].action == ACTION_PUSH) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@%i\n"
+                        "D=A\n"
+                        "@%s\n"
+                        "A=D+%s\n"
+                        "D=M\n"
+                        "@SP\n"
+                        "A=M\n"
+                        "M=D\n"
+                        "@SP\n"
+                        "M=M+1\n",
+                        instructions[i].number,
+                        SEGMENT_TO_REGISTER_NAME[instructions[i].segment],
+                        instructions[i].segment == SEGMENT_TEMP ? "A" : "M");
+                } else {
+                    printf("Invalid action-segment pair. Can only push/pop when segment specified.\n");
+                    return 1;
+                }
+            break;
+
+            case SEGMENT_CONSTANT:
+                if (instructions[i].action == ACTION_PUSH) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@%i\n"
+                        "D=A\n"
+                        "@SP\n"
+                        "A=M\n"
+                        "M=D\n"
+                        "@SP\n"
+                        "M=M+1\n",
+                        instructions[i].number);
+                } else {
+                    printf("Invalid action. Can only 'push' from '%s' memory segment.\n",
+                        INST_SEGMENT_STRINGS[SEGMENT_CONSTANT]);
+                    return 1;
+                }
+            break;
+
+            case SEGMENT_POINTER:
+                // Exit if invalid number given
+                if (instructions[i].number != 0 && instructions[i].number != 1) {
+                    printf("Invalid number '%i' with memory segment '%s'\n",
+                        instructions[i].number,
+                        INST_SEGMENT_STRINGS[SEGMENT_POINTER]);
+                    return 1;
+                }
+
+                if (instructions[i].action == ACTION_PUSH) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@%s\n"
+                        "D=M\n"
+                        "@SP\n"
+                        "A=M\n"
+                        "M=D\n"
+                        "@SP\n"
+                        "M=M+1\n",
+                        instructions[i].number == 0 ?
+                            SEGMENT_TO_REGISTER_NAME[SEGMENT_THIS] : SEGMENT_TO_REGISTER_NAME[SEGMENT_THAT]);
+                } else if (instructions[i].action == ACTION_POP) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@SP\n"
+                        "M=M-1\n"
+                        "A=M\n"
+                        "D=M\n"
+                        "@%s\n"
+                        "M=D\n",
+                        instructions[i].number == 0 ?
+                            SEGMENT_TO_REGISTER_NAME[SEGMENT_THIS] : SEGMENT_TO_REGISTER_NAME[SEGMENT_THAT]);
+                }
+            break;
+
+            case SEGMENT_STATIC:
+                if (instructions[i].action == ACTION_PUSH) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@%s.%i\n"
+                        "D=M\n"
+                        "@SP\n"
+                        "A=M\n"
+                        "M=D\n"
+                        "@SP\n"
+                        "M=M+1\n",
+                        input_file_name, instructions[i].number);
+                } else if (instructions[i].action == ACTION_POP) {
+                    append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                        "@SP\n"
+                        "M=M-1\n"
+                        "A=M\n"
+                        "D=M\n"
+                        "@%s.%i\n"
+                        "M=D\n",
+                        input_file_name, instructions[i].number);
+                }
+            break;
+
+            case SEGMENT_NONE:
+                switch (instructions[i].action) {
+                    case ACTION_NEG:
+                    case ACTION_NOT:
+                        append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                            "@SP\n"
+                            "A=M-1\n"
+                            "M=%sM\n",
+                            instructions[i].action == ACTION_NEG ?
+                                ARITHMETIC_LOGIC_ACTION_TABLE[ACTION_NEG]
+                                : ARITHMETIC_LOGIC_ACTION_TABLE[ACTION_NOT]);
+                    break;
+
+                    case ACTION_ADD:
+                    case ACTION_SUB:
+                    case ACTION_AND:
+                    case ACTION_OR:
+                        append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                            "@SP\n"
+                            "M=M-1\n"
+                            "A=M\n"
+                            "D=M\n"
+                            "A=A-1\n"
+                            "M=M%sD\n",
+                            ARITHMETIC_LOGIC_ACTION_TABLE[instructions[i].action]);
+                    break;
+
+                    case ACTION_EQ:
+                    case ACTION_LT:
+                    case ACTION_GT: {
+                        char *action_str = INST_ACTION_STRINGS[instructions[i].action];
+                        char *comp_str = COMPARISON_ACTION_TABLE[instructions[i].action];
+                        append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
+                            "@SP\n"
+                            "M=M-1\n"
+                            "A=M\n"
+                            "D=M\n"
+                            "A=A-1\n"
+                            "D=M-D\n"
+                            "@__%s.%s.%li.T\n"
+                            "D;%s\n"
+                            "@__%s.%s.%li.F\n"
+                            "0;JMP\n"
+                            "(__%s.%s.%li.T)\n"
+                            "@SP\n"
+                            "A=M-1\n"
+                            "M=-1\n"
+                            "@__%s.%s.%li.END\n"
+                            "0;JMP\n"
+                            "(__%s.%s.%li.F)\n"
+                            "@SP\n"
+                            "A=M-1\n"
+                            "M=0\n"
+                            "(__%s.%s.%li.END)\n",
+                            input_file_name, action_str, i,
+                            comp_str,
+                            input_file_name, action_str, i,
+                            input_file_name, action_str, i,
+                            input_file_name, action_str, i,
+                            input_file_name, action_str, i,
+                            input_file_name, action_str, i);
+                    }
+                    break;
+
+                    default: {
+                        printf("Fatal error, action is '%s'\n", INST_ACTION_STRINGS[instructions[i].action]);
+                        return 1;
+                    }
+                }
+                
+                break;
+
+            default:
+                printf("Unhandled memory segment specified\n");
+                append_size = 0;
+                break;
+            }
+
+            // If out_buf is full, reallocate and restart loop
+            if (append_size >= out_buf_size - out_i) {
+                out_buf_size *= 2;
+                out_buf = realloc(out_buf, out_buf_size);
+                continue;
+            }
+            out_i += append_size;
+            break;
+        }
     }
 
     out_buf[++out_i] = '\0';
 
-    printf("%s", out_buf);
+    // Write file (size - 1 to exclude null terminator)
+    int error = write_file(out_buf, output_file_path, out_i - 1);
+    if (error) {
+        printf("Error when writing to '%s'\n", output_file_path);
+    }
 
-    /*char *out_buf = "@10\n"
-                       "D=A\n"
-                       "@SP\n"
-                       "A=M\n"
-                       "M=D\n"
-                       "@SP\n"
-                       "M=M+1\n";*/
-
-    // Print the file to stdout
-    //printf("\nInput is:\n%s\nOutput is:\n%s\n", input_buf, output_buf);
+    // Free all memory
+    free(input_buf);
+    free(instructions);
+    free(out_buf);
     return 0;
 }

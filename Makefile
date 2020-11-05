@@ -1,13 +1,17 @@
 # Makefile
 CC:= gcc
 CFLAGS:= -Wall -pedantic -std=c99 -O2
+G_CFLAGS:= -Wall -pedantic -std=c99 -O1
 
 all: hvm
 
-hvm: hvm.c file.c
+hvm: hvm.c hvm.h file.c
 	$(CC) $(CFLAGS) $^ -o hvm
 
 hvm_g: hvm.c file.c
-	$(CC) $(CFLAGS) $^ -g -o hvm_g
+	$(CC) $(G_CFLAGS) $^ -g -o hvm_g
 
-.PHONY: all
+clean:
+	rm hvm hvm_g
+
+.PHONY: all clean
