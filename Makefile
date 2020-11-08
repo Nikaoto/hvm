@@ -8,6 +8,9 @@ all: hvm
 hvm: hvm.c hvm.h file.c
 	$(CC) $(CFLAGS) $^ -o hvm
 
+hvm_old: hvm_old.c hvm_old.h file.c
+	$(CC) $(CFLAGS) $^ -o hvm_old
+
 hvm_g: hvm.c file.c
 	$(CC) $(G_CFLAGS) $^ -g -o hvm_g
 

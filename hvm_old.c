@@ -29,29 +29,9 @@
 #include "hvm.h"
 
 typedef struct {
-    enum STACK_ACTION stack_action;
-    enum STACK_SEGMENT stack_segment;
+    enum ACTION action;
+    enum SEGMENT segment;
     int number;
-} Stack_Instruction;
-
-typedef struct {
-    enum FLOW_ACTION flow_action; // DECLARE, GOTO, IF_GOTO
-    char *label_name; // can not be null
-} Flow_Instruction;
-
-typedef struct {
-    enum FUNC_ACTION func_action; // DECLARE, CALL, RETURN
-    int number; // when declaring, n local vars; when calling, n args passed;
-    char *func_name; // can be null
-} Func_Instruction;
-
-typedef struct {
-    enum INST_TYPE type;
-    union inst {
-        Stack_Instruction stack;
-        Flow_Instruction flow;
-        Func_Instruction func;
-    };
 } Instruction;
 
 void print_instruction(Instruction *inst)
@@ -88,26 +68,6 @@ typedef struct {
     char *start; // inclusive
     char *end; // inclusive
 } Slice;
-
-void print_str_range(char *start, char *end)
-{
-    if (start == NULL)
-        printf("print_str_range: start is null\n");
-
-    if (end == NULL)
-        printf("print_str_range: end is null\n");
-
-    if (start == NULL || end == NULL)
-        return;
-
-    while (start != end) {
-        putchar(*start);
-        start++;
-    }
-
-    putchar(*end);
-    putchar('\n');
-}
 
 inline int is_number(char c)
 {
@@ -405,8 +365,6 @@ int main(int argc, char* argv[])
             i = find_next_any_index(input_buf, i, "\r\n") + 1;
             continue;
         }
-
-        // Parse label TODO
 
         // Parse action
         int action_found = 0;
