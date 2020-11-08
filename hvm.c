@@ -380,7 +380,7 @@ int main(int argc, char* argv[])
 
         // No action means invalid instruction
         if (!action_found) {
-            printf("Invalid instruction on line %li\n", src_line_count + 1);
+            printf("Invalid instruction on line %li\n", src_line_count);
             return 1;
         }
 
@@ -420,13 +420,13 @@ int main(int argc, char* argv[])
             char *inst_end = line_end;
 
             // Find comment between token and end of line
-            char *comment_start = strstr_range(input_buf + i, "//", inst_end - 1);
+            char *comment_start = strstr_range(num_end, inst_end - 1, "//");
             if (comment_start != NULL) {
                 // Parse from start of line until comment start
                 inst_end = comment_start;
             }
 
-            // Check for invalid chars between num_end and end
+            // Check for invalid chars between num_end and inst_end
             num_end++; // Stand on char after number
             while (num_end < inst_end) {
                 // Only whitespace is valid
