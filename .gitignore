@@ -2,3 +2,4 @@ hvm
 hvm_g
 *.hack
 !*.cmp.hack
+test/
