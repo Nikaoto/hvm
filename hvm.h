@@ -1,80 +1,120 @@
-enum ACTION {
-    ACTION_POP = 0,
-    ACTION_PUSH,
-    ACTION_ADD,
-    ACTION_SUB,
-    ACTION_NEG,
-    ACTION_EQ,
-    ACTION_GT,
-    ACTION_LT,
-    ACTION_AND,
-    ACTION_OR,
-    ACTION_NOT,
-    //ACTION_PARSE_ERROR,
+#ifndef HVM_H
+#define HVM_H
+
+enum INST_TYPE {
+    INST_ARITHLOGIC = 0,
+    INST_STACK,
+    INST_FLOW,
+    INST_FUNC,
+};
+
+enum ARITHLOGIC_ACTION {
+    ADD = 0,
+    SUB, NEG,
+    EQ,  GT,  LT,
+    AND, OR,  NOT,
+    //ARITHLOGIC_ACTION_PARSE_ERROR,
+};
+
+char *ARITHLOGIC_ACTION_STRINGS[] = {
+    [ADD] = "add",
+    [SUB] = "sub", [NEG] = "neg",
+    [EQ]  = "eq",  [GT]  = "gt",  [LT]  = "lt",
+    [AND] = "and", [OR]  = "or",  [NOT] = "not",
+};
+
+char *ARITHLOGIC_ACTION_TABLE[] = {
+    [ADD] = "+",
+    [SUB] = "-",   [NEG] = "-",
+    [EQ]  = "JEQ", [GT]  = "JGT", [LT]  = "JLT",
+    [AND] = "&",   [OR]  = "|",   [NOT] = "!",
+};
+
+enum STACK_ACTION {
+    POP = 0, PUSH,
+    //STACK_ACTION_PARSE_ERROR,
+};
+
+char *STACK_ACTION_STRINGS[] = {
+    [POP] = "pop", [PUSH] = "push",
 };
 
 enum SEGMENT {
-    SEGMENT_NONE = 0,
-    SEGMENT_ARGUMENT,
-    SEGMENT_LOCAL,
-    SEGMENT_STATIC,
-    SEGMENT_CONSTANT,
-    SEGMENT_THIS,
-    SEGMENT_THAT,
-    SEGMENT_POINTER,
-    SEGMENT_TEMP,
-    //SEGMENT_PARSE_ERROR,
+    SEG_NONE = 0,
+    SEG_ARGUMENT, SEG_LOCAL,
+    SEG_STATIC,   SEG_CONSTANT,
+    SEG_THIS,     SEG_THAT,
+    SEG_POINTER,  SEG_TEMP,
+    //SEG_PARSE_ERROR,
 };
 
-char *INST_ACTION_STRINGS[] = {
-    [ACTION_POP]  = "pop",
-    [ACTION_PUSH] = "push",
-    [ACTION_ADD]  = "add",
-    [ACTION_SUB]  = "sub",
-    [ACTION_NEG]  = "neg",
-    [ACTION_EQ]   = "eq",
-    [ACTION_GT]   = "gt",
-    [ACTION_LT]   = "lt",
-    [ACTION_AND]  = "and",
-    [ACTION_OR]   = "or",
-    [ACTION_NOT]  = "not",
-};
-
-char *INST_SEGMENT_STRINGS[] = {
-    [SEGMENT_NONE]     = "NONE",
-    [SEGMENT_ARGUMENT] = "argument",
-    [SEGMENT_LOCAL]    = "local",
-    [SEGMENT_STATIC]   = "static",
-    [SEGMENT_CONSTANT] = "constant",
-    [SEGMENT_THIS]     = "this",
-    [SEGMENT_THAT]     = "that",
-    [SEGMENT_POINTER]  = "pointer",
-    [SEGMENT_TEMP]     = "temp",
+char *SEGMENT_STRINGS[] = {
+    [SEG_NONE]     = "NONE",
+    [SEG_ARGUMENT] = "argument",  [SEG_LOCAL]    = "local",
+    [SEG_STATIC]   = "static",    [SEG_CONSTANT] = "constant",
+    [SEG_THIS]     = "this",      [SEG_THAT]     = "that",
+    [SEG_POINTER]  = "pointer",   [SEG_TEMP]     = "temp",
 };
 
 char *SEGMENT_TO_REGISTER_NAME[] = {
-    [SEGMENT_NONE]     = "NONE",
-    [SEGMENT_ARGUMENT] = "ARG",
-    [SEGMENT_LOCAL]    = "LCL",
-    [SEGMENT_STATIC]   = "NONE",
-    [SEGMENT_CONSTANT] = "NONE",
-    [SEGMENT_THIS]     = "THIS",
-    [SEGMENT_THAT]     = "THAT",
-    [SEGMENT_POINTER]  = "POINTER",
-    [SEGMENT_TEMP]     = "5", // TEMP starts at address 5
+    [SEG_NONE]     = "NONE",
+    [SEG_ARGUMENT] = "ARG",     [SEG_LOCAL]    = "LCL",
+    [SEG_STATIC]   = "NONE",    [SEG_CONSTANT] = "NONE",
+    [SEG_THIS]     = "THIS",    [SEG_THAT]     = "THAT",
+    [SEG_POINTER]  = "POINTER", [SEG_TEMP]     = "5",
 };
 
-char *ARITHMETIC_LOGIC_ACTION_TABLE[] = {
-    [ACTION_ADD]  = "+",
-    [ACTION_SUB]  = "-",
-    [ACTION_NEG]  = "-",
-    [ACTION_AND]  = "&",
-    [ACTION_OR]   = "|",
-    [ACTION_NOT]  = "!",
+enum FLOW_ACTION {
+    DECLARE_LABEL = 0,
+    GOTO, IF_GOTO
 };
 
-char *COMPARISON_ACTION_TABLE[] = {
-    [ACTION_EQ] = "JEQ",
-    [ACTION_GT] = "JGT",
-    [ACTION_LT] = "JLT",
+char *FLOW_ACTION_STRINGS[] = {
+    [DECLARE_LABEL] = "label",
+    [GOTO]          = "goto",
+    [IF_GOTO]       = "if-goto",
 };
+
+enum FUNC_ACTION {
+    DECLARE_FUNC = 0,
+    CALL, RETURN
+};
+
+char *FUNC_ACTION_STRINGS[] = {
+    [DECLARE_FUNC] = "function",
+    [CALL]         = "call",
+    [RETURN]       = "return",
+};
+
+typedef struct {
+    enum ARITHLOGIC_ACTION action;
+} Arithlogic_Instruction;
+
+typedef struct {
+    enum STACK_ACTION action;
+    enum SEGMENT segment;
+    int number;
+} Stack_Instruction;
+
+typedef struct {
+    enum FLOW_ACTION action; // DECLARE, GOTO, IF_GOTO
+    char *label_name; // can not be null
+} Flow_Instruction;
+
+typedef struct {
+    enum FUNC_ACTION action; // DECLARE, CALL, RETURN
+    char *func_name; // can be null
+    int number; // when declaring, n local vars; when calling, n args passed;
+} Func_Instruction;
+
+typedef struct {
+    enum INST_TYPE type;
+    union {
+        Arithlogic_Instruction arithlogic;
+        Stack_Instruction stack;
+        Flow_Instruction flow;
+        Func_Instruction func;
+    } inst;
+} Instruction;
+
+#endif // HVM_H

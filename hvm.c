@@ -17,69 +17,73 @@
 #include "file.h"
 
 #define MIN_ARGC                           2
-#define MAX_ARGC                           4
 #define ERR_TEXT_SIZE                      200
 #define FILE_PATH_SIZE                     200
 
 #define INST_ARRAY_INITIAL_CAPACITY        1024
 #define INST_ARRAY_CAPACITY_GROWTH_RATE    1024
-#define COMMENT_HEADERS_IN_OUTFILE         1
+#define GENERATE_HEADER_COMMENTS           1
 #define INITIAL_HACK_CODE_SIZE_PER_INST    8
 
 #include "hvm.h"
 
-typedef struct {
-    enum STACK_ACTION stack_action;
-    enum STACK_SEGMENT stack_segment;
-    int number;
-} Stack_Instruction;
-
-typedef struct {
-    enum FLOW_ACTION flow_action; // DECLARE, GOTO, IF_GOTO
-    char *label_name; // can not be null
-} Flow_Instruction;
-
-typedef struct {
-    enum FUNC_ACTION func_action; // DECLARE, CALL, RETURN
-    int number; // when declaring, n local vars; when calling, n args passed;
-    char *func_name; // can be null
-} Func_Instruction;
-
-typedef struct {
-    enum INST_TYPE type;
-    union inst {
-        Stack_Instruction stack;
-        Flow_Instruction flow;
-        Func_Instruction func;
-    };
-} Instruction;
-
-void print_instruction(Instruction *inst)
+void print_instruction(Instruction *i)
 {
-    printf("action=%s, segment=%s, number=%i\n",
-        INST_ACTION_STRINGS[inst->action],
-        INST_SEGMENT_STRINGS[inst->segment],
-        inst->number);
+    switch (i->type) {
+    case INST_ARITHLOGIC:
+        printf("Arithlogic_Instruction { .action=%s }",
+            ARITHLOGIC_ACTION_STRINGS[i->inst.arithlogic.action]);
+        break;
+    case INST_STACK:
+        printf("Stack_Instruction { .action=%s, segment=%s, number=%i }",
+            STACK_ACTION_STRINGS[i->inst.stack.action],
+            SEGMENT_STRINGS[i->inst.stack.segment],
+            i->inst.stack.number);
+        break;
+    case INST_FLOW:
+        printf("Flow_Instruction { .action=%s, .label_name=%s }",
+            FLOW_ACTION_STRINGS[i->inst.flow.action],
+            i->inst.flow.label_name);
+        break;
+    case INST_FUNC:
+        printf("Func_Instruction { .action=%s, .func_name=%s, .number=%i }",
+            FUNC_ACTION_STRINGS[i->inst.func.action],
+            i->inst.func.func_name ? i->inst.func.func_name : "NULL",
+            i->inst.func.number);
+        break;
+    default:
+        printf("print_instruction: Invalid instruction type");
+    }
 }
 
-int snprintf_instruction(char *str, size_t size, Instruction *inst)
+int snprintf_instruction_comment(char *str, size_t size, Instruction *i)
 {
-    if (inst->segment == SEGMENT_NONE)
-        return snprintf(str, size, "%s", INST_ACTION_STRINGS[inst->action]);
-    return snprintf(str, size, "%s %s %i",
-        INST_ACTION_STRINGS[inst->action],
-        INST_SEGMENT_STRINGS[inst->segment],
-        inst->number);
-}
-
-int snprintf_instruction_comment(char *str, size_t size, Instruction *inst)
-{
-    if (inst->segment == SEGMENT_NONE)
-        return snprintf(str, size, "// %s", INST_ACTION_STRINGS[inst->action]);
-    return snprintf(str, size, "// %s %s %i",
-        INST_ACTION_STRINGS[inst->action],
-        INST_SEGMENT_STRINGS[inst->segment],
-        inst->number);
+    switch (i->type) {
+    case INST_ARITHLOGIC:
+        return snprintf(str, size,
+            "// Arithlogic_Instruction { .action=%s }",
+            ARITHLOGIC_ACTION_STRINGS[i->inst.arithlogic.action]);
+     case INST_STACK:
+        return snprintf(str, size,
+            "// Stack_Instruction { .action=%s, .segment=%s, .number=%i }",
+            STACK_ACTION_STRINGS[i->inst.stack.action],
+            SEGMENT_STRINGS[i->inst.stack.segment],
+            i->inst.stack.number);
+     case INST_FLOW:
+        return snprintf(str, size,
+            "// Flow_Instruction { .action=%s, .label_name='%s' }",
+            FLOW_ACTION_STRINGS[i->inst.flow.action],
+            i->inst.flow.label_name);
+    case INST_FUNC:
+        return snprintf(str, size,
+            "// Func_Instruction { .action=%s, .func_name='%s', .number=%i }",
+            FUNC_ACTION_STRINGS[i->inst.func.action],
+            i->inst.func.func_name ? i->inst.func.func_name : "NULL",
+            i->inst.func.number);
+    default:
+        return snprintf(str, size,
+            "// print_instruction: Invalid instruction type");
+    }
 }
 
 // String, but defined by a range in memory (inclusive)
@@ -112,6 +116,23 @@ void print_str_range(char *start, char *end)
 inline int is_number(char c)
 {
     return c >= '0' && c <= '9';
+}
+
+inline int is_alpha(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+// Checks if char is allowed to be the first char of a symbol
+int is_valid_symbol_head(char c)
+{
+    return is_alpha(c) || c == '_' || c == '.' || c == '$' || c  == ':';
+}
+
+// Checks if char is allowed in a symbol as a non-first char
+int is_valid_symbol_tail(char c)
+{
+    return is_valid_symbol_head(c) || is_number(c);
 }
 
 // Returns a^b
@@ -282,99 +303,352 @@ int str_replace_last(char *str, char *sub, char *rep)
     return 0;
 }
 
-// Sets input_file, output_file, and error_text
-// Returns 0 on success, 1 on error
-int parse_arguments(int argc, char* argv[],
-    char *input_file, char *output_file, char *error_text)
+// Returned by parse_*_instruction_* functions
+typedef struct {
+    size_t token_length;
+    char *error;
+} Parse_Result;
+
+// Expects first token to already be parsed into i.
+// Parses the rest of the instruction and returns its length.
+Parse_Result parse_stack_instruction_tail(char *str, Instruction *i)
 {
-    if (argc > MAX_ARGC) {
-        strcpy(error_text, "error: too many arguments");
-        return 1;
+    size_t len = 0;
+
+    // Skip whitespace
+    while (str[len] == ' ' || str[len] == '\t')
+        len++;
+
+    int segment_found = 0;
+    for (size_t k = 0; k < sizeof(SEGMENT_STRINGS) / sizeof(char*); k++) {
+        if (str_begins_with(str + len, SEGMENT_STRINGS[k])) {
+            segment_found = 1;
+            i->inst.stack.segment = k;
+            len += strlen(SEGMENT_STRINGS[k]);
+            break;
+        }
     }
+
+    if (!segment_found) {
+        return (Parse_Result) {
+            .token_length = len,
+            .error = "Expected segment in stack instruction\n"
+        };
+    }
+
+    // Skip whitespace
+    while (str[len] == ' ' || str[len] == '\t')
+        len++;
+
+    // Parse number
+    if (is_number(str[len])) {
+        // Find end of number token
+        char *num_end = str + len + 1;
+        while (is_number(*num_end))
+            num_end++;
+        num_end--; // Stand on last digit of number
+
+        // Parse the number and add to instruction
+        i->inst.stack.number = parse_next_int(str + len, num_end);
+
+        size_t num_len = (num_end + 1) - (str + len);
+        len += num_len;
+    } else {
+        return (Parse_Result) {
+            .token_length = len,
+            .error = "Expected number in stack instruction\n"
+        };
+    }
+
+    return (Parse_Result) { .token_length = len, .error = NULL };
+}
+
+// Parses label name, returns its length or error
+Parse_Result parse_label_name(char *str)
+{
+    // Return error if invalid char found
+    if (!is_valid_symbol_head(*str)) {
+        return (Parse_Result) {
+            .token_length = 0,
+            .error = "Expected label name, got invalid character\n"
+        };
+    }
+
+    // Find end of label name
+    char *label_name_end = str + 1;
+    while (is_valid_symbol_tail(*label_name_end)) {
+        label_name_end++;
+    }
+
+    return (Parse_Result) { .token_length = label_name_end - str, .error = NULL };
+}
+
+// Expects first token to already be parsed into i.
+// Parses the rest of the instruction and returns its length.
+Parse_Result parse_flow_instruction_tail(char *str, Instruction *i)
+{
+    size_t len = 0;
+
+    // Skip whitespace
+    while (str[len] == ' ' || str[len] == '\t')
+        len++;
+
+    // Parse label name
+    Parse_Result res = parse_label_name(str + len);
+    if (res.error) {
+        return (Parse_Result) {
+            .token_length = len + res.token_length,
+            .error = res.error
+        };
+    }
+
+    // Copy label name
+    size_t label_len = res.token_length;
+    i->inst.flow.label_name = strncpy(malloc(sizeof(char) * label_len),
+        str + len, label_len);
+
+    len += label_len;
+    return (Parse_Result) { .token_length = len, .error = NULL };
+}
+
+// Expects first token to already be parsed into i.
+// Parses the rest of the instruction and returns its length.
+Parse_Result parse_func_instruction_tail(char *str, Instruction *i)
+{
+    size_t len = 0;
+
+    // Skip whitespace
+    while (str[len] == ' ' || str[len] == '\t')
+        len++;
+
+    if (i->inst.func.action == RETURN) {
+        // Nothing else to parse
+        return (Parse_Result) { .token_length = len, .error = NULL };
+    }
+
+    // Parse function name
+    Parse_Result res = parse_label_name(str + len);
+    if (res.error) {
+        return (Parse_Result) {
+            .token_length = len + res.token_length,
+            .error = res.error
+        };
+    }
+
+    // Copy function name
+    size_t func_len = res.token_length;
+    i->inst.func.func_name = strncpy(malloc(sizeof(char) * func_len),
+        str + len, func_len);
+
+    len += func_len;
+
+    // Skip whitespace
+    while (str[len] == ' ' || str[len] == '\t')
+        len++;
+
+    // Parse number
+    if (is_number(str[len])) {
+        // Find end of number token
+        char *num_end = str + len + 1;
+        while (is_number(*num_end))
+            num_end++;
+        num_end--; // Stand on last digit of number
+
+        // Parse the number and add to instruction
+        i->inst.func.number = parse_next_int(str + len, num_end);
+
+        size_t num_len = (num_end + 1) - (str + len);
+        len += num_len;
+    } else {
+        return (Parse_Result) {
+            .token_length = len,
+            .error = "Expected number in func instruction\n"
+        };
+    }
+    
+    return (Parse_Result) { .token_length = len, .error = NULL };    
+}
+
+typedef struct {
+    int input_file_count;
+    int output_file_count;
+    char **input_files; // input_files[k] is compiled into output_files[k]
+    char **output_files; // if output_file_count == 1, all input_files compile into one
+    char *error;
+} Argparse_Result;
+
+// Parses CLI arguments
+Argparse_Result parse_arguments(int argc, char *argv[])
+{
+    printf("args are:\n");
+    for (int i = 0; i < argc; i++) {
+        printf("%s\n", argv[i]);
+    }
+    printf("\n");
+
+    Argparse_Result r = {
+        .input_file_count = 0,
+        .output_file_count = 0,
+        .input_files = NULL,
+        .output_files = NULL,
+        .error = NULL
+    };
 
     if (argc < MIN_ARGC) {
-        strcpy(error_text, "error: input file not given");
-        return 1;
+        r.error = "Expected input file\n";
+        return r;
     }
 
-    *input_file = 0;
-    *output_file = 0;
-
+    int output_switch = 0;
     for (int i = 1; i < argc; i++) {
         // Handle -o switch
-        if (strindex(argv[i], "-o") > -1) {
-            // Exit if multiple output files given
-            if (*output_file != 0) {
-                strcpy(error_text, "error: too many output files");
-                return 1;
+        if (str_begins_with(argv[i], "-o")) {
+            if (output_switch) {
+                r.error = "Multiple -o switches not allowed\n";
+                return r;
             }
 
-            // Exit if option not spaced (ex: -ofile)
-            // TODO better to separate -ofile into "-o" and "file" before
-            //  passing argv to this function
             if (argv[i][2] != 0) {
-                snprintf(error_text, ERR_TEXT_SIZE,
-                    "error: unrecognized argument '%s'", argv[i]);
-                return 1;
+                r.error = "Unrecognized argument following -o\n";
+                return r;
             }
 
-            // Grab next arg as output_file
+            // Grab next arg as single output file
             if (i + 1 >= argc) {
-                strcpy(error_text, "error: expected output file after '-o'");
-                return 1;
+                r.error = "Expected output file after '-o'\n";
+                return r;
             }
-            strncpy(output_file, argv[i + 1], FILE_PATH_SIZE);
+
             i++;
-        } else { // Argument is input_file
-            // Exit if multiple input files given
-            if (*input_file != 0) {
-                strcpy(error_text, "error: too many input files");
-                return 1;
+            // Add output file
+            r.output_files = malloc(sizeof(char**));
+            size_t len = strlen(argv[i]);
+            r.output_files[r.output_file_count++] = strcpy(malloc(len * sizeof(char)), argv[i]);
+
+            output_switch = 1;
+            continue;
+        }
+
+        // Add input file
+        r.input_files = realloc(r.input_files, sizeof(char**) * (++r.input_file_count));
+        size_t len = strlen(argv[i]);
+        r.input_files[r.input_file_count-1] = strcpy(malloc(len * sizeof(char)), argv[i]);
+    }
+
+    if (r.input_file_count == 0) {
+        r.error = "No input file given\n";
+        return r;
+    }
+
+    // Output switch not given, we have as many output files as input files
+    if (!output_switch) {
+        // Copy input files to output files, replacing extensions
+        r.output_file_count = r.input_file_count;
+        r.output_files = realloc(r.output_files, sizeof(char**) * r.output_file_count);
+        for (int i = 0; i < r.input_file_count; i++) {
+            // Copy string
+            size_t in_len = strlen(r.input_files[i]);
+            size_t len = in_len - strlen(".vm") + strlen(".asm");
+            if (len < in_len) len = in_len; // Make sure
+            r.output_files[i] = strcpy(malloc(len * sizeof(char)), r.input_files[i]);
+
+            // Replace extension
+            int err = str_replace_last(r.output_files[i], ".vm", ".asm");
+            if (err != 0) {
+                // input file doesn't end with ".vm"
+                strcat(r.output_files[i], ".asm");
             }
-            strncpy(input_file, argv[i], FILE_PATH_SIZE);
         }
     }
 
-    if (*input_file == 0) {
-        strcpy(error_text, "error: input file not given");
-        return 1;
-    }
+    return r;
+}
 
-    if (*output_file == 0) {
-        strncpy(output_file, input_file, FILE_PATH_SIZE);
-        int err = str_replace_last(output_file, ".vm", ".asm");
-        if (err != 0) { // input_file doesn't end with .asm
-            strncat(output_file, ".asm",
-                FILE_PATH_SIZE - strlen(output_file));
-        }
-    }
+typedef struct {
+    size_t instruction_count;
+    char *output_buf;
+    size_t output_buf_size;
+} Trans_Result;
 
-    return 0;
+Trans_Result translate(char *input_buf)
+{
+    return (Trans_Result) { .instruction_count = 0 };
 }
 
 int main(int argc, char* argv[])
 {
-    char input_file_path[FILE_PATH_SIZE];
-    char output_file_path[FILE_PATH_SIZE];
-    char error_text[ERR_TEXT_SIZE];
-
-    // Parse arguments
-    int err = parse_arguments(argc, argv, input_file_path, output_file_path,
-        error_text);
-    if (err == 1) {
-        printf("%s\n", error_text);
+    Argparse_Result r = parse_arguments(argc, argv);
+    if (r.error) {
+        printf("Error parsing arguments: %s", r.error);
         return 1;
     }
 
-    // Determine file name
-    char input_file_name[FILE_PATH_SIZE];
-    int last_slash_i = strindex_last(input_file_path, "/");
+    printf("input_files: (%i)\n", r.input_file_count);
+    for (int i = 0; i < r.input_file_count; i++)
+        printf("\t%s\n", r.input_files[i]);
 
-    // Copy from last_slash_i + 1 to the end
-    for (int i = 0, j = last_slash_i + 1; input_file_path[j-1] != '\0'; i++, j++)
-        input_file_name[i] = input_file_path[j];
+    printf("output_files: (%i)\n", r.output_file_count);
+    for (int i = 0; i < r.output_file_count; i++)
+        printf("\t%s\n", r.output_files[i]);
 
-    size_t instructions_capacity = INST_ARRAY_INITIAL_CAPACITY;
+    // Determine input file basenames TODO move into translate func
+    char **input_file_basenames = malloc(sizeof(char**) * r.input_file_count);
+    for (int k = 0; k < r.input_file_count; k++) {
+        int last_slash_i = strindex_last(r.input_files[k], "/");
+        int basename_len = strlen(r.input_files[k] - last_slash_i);
+        input_file_basenames[k] = malloc(basename_len * sizeof(char));
+
+        // Copy from last_slash_i + 1 to the end
+        for (int i = 0, j = last_slash_i + 1; r.input_files[k][j-1] != '\0'; i++, j++)
+            input_file_basenames[k][i] = r.input_files[k][j];
+    }
+
+    // Translate all files
+    size_t *input_buf_sizes = malloc(r.input_file_count * sizeof(size_t));
+    char **input_bufs = malloc(r.input_file_count * sizeof(char**));
+    char **output_bufs = malloc(r.output_file_count * sizeof(char**));
+    Trans_Result *trs = malloc(r.input_file_count * sizeof(Trans_Result));
+    for (int i = 0; i < r.input_file_count; i++) {
+        input_bufs[i] = load_file(r.input_files[i], &input_buf_sizes[i]);
+        trs[i] = translate(input_bufs[i]);
+    }
+
+    // Concatenate into one file if single output file
+    if (r.output_file_count == 1) {
+        // Get total output size
+        size_t output_buf_size = 0;
+        for (int i = 0; i < r.input_file_count; i++) {
+            output_buf_size += (trs[i].output_buf_size - 1); // Exclude nullterms
+        }
+        output_buf_size += 1; // nullterm
+
+        // Concatenate them all
+        output_bufs[0] = malloc(output_buf_size * sizeof(char*));
+        size_t curr_len = 0;
+        for (int i = 0; i < r.input_file_count; i++) {
+            strcat(output_bufs[0] + curr_len, trs[i].output_buf);
+            curr_len += output_buf_size - 1; // Overwrite nullterm
+        }
+
+        // Update size inside translate result object
+        trs[0].output_buf_size = output_buf_size;
+    }
+
+    // Write out all files
+    for (int i = 0; i < r.output_file_count; i++) {
+        int error = write_file(output_bufs[i], r.output_files[i], trs[i].output_buf_size - 1);
+        if (error) {
+            printf("Error when writing to '%s'\n", r.output_files[i]);
+            return 1;
+        }
+    }
+
+    // Free memory TODO lmao
+
+    return 0;
+}
+
+/*    size_t instructions_capacity = INST_ARRAY_INITIAL_CAPACITY;
     Instruction *instructions = malloc(sizeof(Instruction) *
         instructions_capacity);
 
@@ -405,84 +679,96 @@ int main(int argc, char* argv[])
             i = find_next_any_index(input_buf, i, "\r\n") + 1;
             continue;
         }
+*/
+        /* Parse one of the following to determine instruction type:
+            add/sub/neg/eq/gt/lt/and/or/not - arithlogic
+            push/pop - stack
+            label/goto/if-goto - flow
+            function/call/return - func */
 
-        // Parse label TODO
+/*        Parse_Result res = { .token_length = 0, .error = NULL };
 
-        // Parse action
-        int action_found = 0;
-        for (size_t k = 0; k < sizeof(INST_ACTION_STRINGS) / sizeof(char*); k++) {
-            if (str_begins_with(input_buf + i, INST_ACTION_STRINGS[k])) {
-                action_found = 1;
-                // TODO precompile lengths so we don't have to use strlen here
-                i += strlen(INST_ACTION_STRINGS[k]);
-                instructions[inst_count].action = k;
-                continue;
+        // Arithlogic instruction
+        for (size_t k = 0; k < sizeof(ARITHLOGIC_ACTION_STRINGS) / sizeof(char*); k++) {
+            if (str_begins_with(input_buf + i, ARITHLOGIC_ACTION_STRINGS[k])) {
+                i += strlen(ARITHLOGIC_ACTION_STRINGS[k]);
+                instructions[inst_count].type = INST_ARITHLOGIC;
+                instructions[inst_count].inst.arithlogic.action = k;
+                // Arithlogic instruction only has one token, which we parsed above
+                res.token_length = 0;
+                res.error = NULL;
+                goto instruction_parsed;
             }
         }
 
-        // No action means invalid instruction
-        if (!action_found) {
-            printf("Invalid instruction on line %li\n", src_line_count);
+        // Stack instruction (pop/push)
+        for (size_t k = 0; k < sizeof(STACK_ACTION_STRINGS) / sizeof(char*); k++) {
+            if (str_begins_with(input_buf + i, STACK_ACTION_STRINGS[k])) {
+                i += strlen(STACK_ACTION_STRINGS[k]);
+                instructions[inst_count].type = INST_STACK;
+                instructions[inst_count].inst.stack.action = k;
+                res = parse_stack_instruction_tail(input_buf + i, instructions + inst_count);
+                goto instruction_parsed;
+            }
+        }
+
+        // Flow instruction
+        for (size_t k = 0; k < sizeof(FLOW_ACTION_STRINGS) / sizeof(char*); k++) {
+            if (str_begins_with(input_buf + i, FLOW_ACTION_STRINGS[k])) {
+                i += strlen(FLOW_ACTION_STRINGS[k]);
+                instructions[inst_count].type = INST_FLOW;
+                instructions[inst_count].inst.flow.action = k;
+                res = parse_flow_instruction_tail(input_buf + i, instructions + inst_count);
+                goto instruction_parsed;
+            }
+        }
+
+        // Func instruction
+        for (size_t k = 0; k < sizeof(FUNC_ACTION_STRINGS) / sizeof(char*); k++) { 
+            if (str_begins_with(input_buf + i, FUNC_ACTION_STRINGS[k])) {
+                i += strlen(FUNC_ACTION_STRINGS[k]);
+                instructions[inst_count].type = INST_FUNC;
+                instructions[inst_count].inst.func.action = k;
+                res = parse_func_instruction_tail(input_buf + i, instructions + inst_count);
+                goto instruction_parsed;
+            }
+        }
+
+        // Invalid token
+        printf("Invalid first token on line %li\n", src_line_count);
+        return 1;
+
+instruction_parsed:
+        // Check for parse error
+        if (res.error) {
+            printf("Parse error on line %li: ", src_line_count);
+            printf("%s", res.error);
             return 1;
         }
 
-        // Skip whitespace
-        while (input_buf[i] == ' ' || input_buf[i] == '\t')
-            i++;
-
-        // Parse memory segment
-        int segment_found = 0;
-        for (size_t k = 0; k < sizeof(INST_SEGMENT_STRINGS) / sizeof(char*); k++) {
-            if (str_begins_with(input_buf + i, INST_SEGMENT_STRINGS[k])) {
-                segment_found = 1;
-                // TODO precompile lengths so we don't have to use strlen here
-                i += strlen(INST_SEGMENT_STRINGS[k]);
-                instructions[inst_count].segment = k;
-                continue;
-            }
-        }
+        // Move to next char after token
+        i += res.token_length;
 
         // Skip whitespace
         while (input_buf[i] == ' ' || input_buf[i] == '\t')
             i++;
 
-        // Parse number (only valid when segment found)
-        if (is_number(input_buf[i]) && segment_found) {
-            // Find end of number token
-            char *num_end = input_buf + i + 1;
-            while (is_number(*num_end))
-                num_end++;
-            num_end--; // Stand on last digit of number
-
-            // Parse the number and add to instruction
-            instructions[inst_count].number = parse_next_int(input_buf + i, num_end);
-
-            // Find end of line
-            char *line_end = find_next_any(input_buf + i, "\r\n");
-            char *inst_end = line_end;
-
-            // Find comment between token and end of line
-            char *comment_start = strstr_range(num_end, inst_end - 1, "//");
-            if (comment_start != NULL) {
-                // Parse from start of line until comment start
-                inst_end = comment_start;
+        // Check for invalid chars
+        char *line_end = find_next_any(input_buf + i, "\r\n");
+        char *comment_start = strstr_range(input_buf + i, line_end, "//");
+        char *check_until = comment_start == NULL ? line_end : comment_start;
+        while (input_buf + i < check_until) {
+            // Anything other than whitespace is invalid
+            if (input_buf[i] != ' ' && input_buf[i] != '\t') {
+                printf("Invalid char '%c' on line %li\n", input_buf[i], src_line_count);
+                return 1;
             }
-
-            // Check for invalid chars between num_end and inst_end
-            num_end++; // Stand on char after number
-            while (num_end < inst_end) {
-                // Only whitespace is valid
-                if (*num_end != ' ' && *num_end != '\t') {
-                    printf("Invalid char '%c' on line %li\n", *num_end, src_line_count);
-                    return 1;
-                }
-                num_end++;
-            }
-
-            // Move i to the end of the line
-            i = line_end - input_buf + 1;
+            i++;
         }
 
+        // Move i to the end of the line
+        i = line_end - input_buf + 1;        
+        
         inst_count++;
     }
 
@@ -494,6 +780,7 @@ int main(int argc, char* argv[])
     for (size_t i = 0; i < inst_count; i++) {
         int line_size = 0;
 
+#if GENERATE_HEADER_COMMENTS == 1
         // Keep resizing out_buf until new line of comment fits
         while(1) {
             line_size = snprintf_instruction_comment(out_buf + out_i, out_buf_size - out_i,
@@ -508,6 +795,7 @@ int main(int argc, char* argv[])
             break;
         }
         out_buf[out_i++] = '\n';
+#endif
 
         int append_size = 0;
         // Keep resizing out_buf until new instructions fit
@@ -640,8 +928,8 @@ int main(int argc, char* argv[])
                             "A=M-1\n"
                             "M=%sM\n",
                             instructions[i].action == ACTION_NEG ?
-                                ARITHMETIC_LOGIC_ACTION_TABLE[ACTION_NEG]
-                                : ARITHMETIC_LOGIC_ACTION_TABLE[ACTION_NOT]);
+                                ARITHLOGIC_ACTION_TABLE[ACTION_NEG]
+                                : ARITHLOGIC_ACTION_TABLE[ACTION_NOT]);
                     break;
 
                     case ACTION_ADD:
@@ -655,14 +943,14 @@ int main(int argc, char* argv[])
                             "D=M\n"
                             "A=A-1\n"
                             "M=M%sD\n",
-                            ARITHMETIC_LOGIC_ACTION_TABLE[instructions[i].action]);
+                            ARITHLOGIC_ACTION_TABLE[instructions[i].action]);
                     break;
 
                     case ACTION_EQ:
                     case ACTION_LT:
                     case ACTION_GT: {
                         char *action_str = INST_ACTION_STRINGS[instructions[i].action];
-                        char *comp_str = COMPARISON_ACTION_TABLE[instructions[i].action];
+                        char *comp_str = ARITHLOGIC_ACTION_TABLE[instructions[i].action];
                         append_size = snprintf(out_buf + out_i, out_buf_size - out_i,
                             "@SP\n"
                             "M=M-1\n"
@@ -734,3 +1022,4 @@ int main(int argc, char* argv[])
     free(out_buf);
     return 0;
 }
+    */
