@@ -553,13 +553,13 @@ Argparse_Result parse_arguments(int argc, char *argv[])
             // Copy string
             size_t in_len = strlen(r.input_files[i]);
             size_t len = in_len - strlen(".vm") + strlen(".asm");
-            if (len < in_len) len = in_len; // Make sure
+            if (len < in_len) len = in_len; // Make it's big enough to fit
             r.output_files[i] = strcpy(malloc(len * sizeof(char)), r.input_files[i]);
 
             // Replace extension
             int err = str_replace_last(r.output_files[i], ".vm", ".asm");
             if (err != 0) {
-                // input file doesn't end with ".vm"
+                // Input file doesn't end with ".vm"
                 strcat(r.output_files[i], ".asm");
             }
         }
