@@ -6,7 +6,7 @@
         hvm src/{Main,Sys}.vm -o out.asm
 
  Translates Hack virtual machine instructions into Hack assembly.
- Can take multiple input files and globs
+ Can take multiple input files and globs.
 
  Options:
      -o outfile      Specify a single output file
