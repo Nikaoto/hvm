@@ -1,13 +1,17 @@
 /*
  hvm - hack virtual machine
 
- Usage: hvm infile [-o outfile]
+ Usage: hvm infile1 [infile2...] [-o outfile]
+        hvm src/*.vm
+        hvm src/{Main,Sys}.vm -o out.asm
 
- Generates hack assembly code using vm instructions from `infile` and writes it
- out to `infile.asm`.
+ Translates Hack virtual machine instructions into Hack assembly.
+ Can take multiple input files and globs
 
  Options:
-     -o outfile      specify output file
+     -o outfile      Specify a single output file
+
+     When no options given, generates a hack asm file for each input file.
 */
 
 #include <stdio.h>
